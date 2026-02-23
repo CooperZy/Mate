@@ -31,12 +31,21 @@ class SessionMemory:
     def upsert_user_facts(self, facts: list[str]) -> None:
         if not facts:
             return
-        existing = self.user_facts_file.read_text(encoding="utf-8")
-        with self.user_facts_file.open("a", encoding="utf-8") as fh:
-            for fact in facts:
-                marker = f"- {fact}"
-                if marker not in existing:
-                    fh.write(marker + "\n")
+
+        existing_lines = self.user_facts_file.read_text(encoding="utf-8").splitlines()
+        seen = {line[2:].strip().lower() for line in existing_lines if line.startswith("- ")}
+
+        new_lines: list[str] = []
+        for fact in facts:
+            normalized = fact.strip().lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            new_lines.append(f"- {fact.strip()}")
+
+        if new_lines:
+            with self.user_facts_file.open("a", encoding="utf-8") as fh:
+                fh.write("\n".join(new_lines) + "\n")
 
     def load_recent_session_summary(self) -> str:
         files = sorted(self.session_dir.glob("*.md"))

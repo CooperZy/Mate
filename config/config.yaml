@@ -5,6 +5,8 @@ breathing:
   soulbeat_interval: 30
   soulbeat_max_tokens: 1024
   soulbeat_timeline_threshold: 20
+  observation_mode: visual
+  heartbeat_only: false
 timeline:
   max_entries: 24
   keep_after_distill: 8
