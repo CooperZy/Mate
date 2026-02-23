@@ -84,26 +84,6 @@ class UnifiedLoopModeTests(unittest.TestCase):
         self.loop._pending_results_buffer.append({"status": "done"})
         self.assertTrue(self.loop._should_run_normal_cycle(1.1))
 
-    def test_pending_results_buffer_is_trimmed(self) -> None:
-        self.loop.query_board.has_pending_results.return_value = True
-        self.loop.query_board.pop_pending_results.return_value = [{"i": i} for i in range(300)]
-
-        self.loop._drain_pending_results()
-
-        self.assertEqual(len(self.loop._pending_results_buffer), self.loop.MAX_PENDING_RESULTS_BUFFER)
-
-    def test_normal_cycle_writes_timeline_even_without_reply(self) -> None:
-        self.loop._inbox.append({"text": "hello", "metadata": {}})
-        parsed = Mock(reply="", tool_calls=[])
-        self.loop._ask_model = Mock(return_value=parsed)
-
-        self.loop._normal_cycle(trigger="inbox")
-
-        self.timeline_manager.add_entry.assert_called_once()
-        kwargs = self.timeline_manager.add_entry.call_args.kwargs
-        self.assertIn("q:hello", kwargs["text"])
-        self.assertIn("assistant:<idle/>", kwargs["text"])
-
 
 if __name__ == "__main__":
     unittest.main()

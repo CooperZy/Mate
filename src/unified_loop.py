@@ -94,6 +94,18 @@ class UnifiedLoop:
         self.config.breathing.heartbeat_only = enabled
         return self.config.breathing.heartbeat_only
 
+    def set_observation_mode(self, mode: str) -> str:
+        if mode not in {"visual", "text_only", "off"}:
+            raise ValueError("mode must be one of: visual, text_only, off")
+        self.config.breathing.observation_mode = mode
+        if mode != "visual":
+            self._latest_frame = None
+        return self.config.breathing.observation_mode
+
+    def set_heartbeat_only(self, enabled: bool) -> bool:
+        self.config.breathing.heartbeat_only = enabled
+        return self.config.breathing.heartbeat_only
+
     def status(self) -> dict[str, Any]:
         with self._state_lock:
             pending_queries = len(self._inbox)
@@ -101,10 +113,10 @@ class UnifiedLoop:
             react_enabled = self._react_enabled
             pending_results_size = len(self._pending_results_buffer)
         return {
-            "react_enabled": react_enabled,
+            "react_enabled": self._react_enabled,
             "observation_mode": self.config.breathing.observation_mode,
             "heartbeat_only": self.config.breathing.heartbeat_only,
-            "pending_queries": pending_queries,
+            "pending_queries": len(self._inbox),
             "timeline_size": len(self.timeline_manager.entries()),
             "tool_tasks": self.query_board.status(),
             "pending_tool_results_buffer": pending_results_size,
@@ -118,13 +130,8 @@ class UnifiedLoop:
             did_work = False
             self._drain_pending_results()
 
-            # Keep heartbeat responsive even under high inbox load.
-            if now - self._last_heartbeat >= self.config.breathing.heartbeat_interval:
-                self._heartbeat_cycle()
-                self._last_heartbeat = now
-                did_work = True
-            elif self._should_run_normal_cycle(now):
-                trigger = "tool_result" if self._pending_results_snapshot() else "inbox"
+            if self._should_run_normal_cycle(now):
+                trigger = "tool_result" if self._pending_results_buffer else "inbox"
                 self._normal_cycle(trigger=trigger)
                 self._last_normal = now
                 did_work = True
@@ -137,23 +144,11 @@ class UnifiedLoop:
                 time.sleep(0.02)
 
     def _should_run_normal_cycle(self, now: float) -> bool:
-        if now - self._last_normal < self.config.breathing.normal_interval:
-            return False
-        with self._state_lock:
-            inbox_has_data = bool(self._inbox)
-            pending_has_data = bool(self._pending_results_buffer)
         if self.config.breathing.heartbeat_only:
-            return inbox_has_data
-        return pending_has_data or inbox_has_data
-
-    def _pending_results_snapshot(self) -> list[dict[str, Any]]:
-        with self._state_lock:
-            return list(self._pending_results_buffer)
-
-    def _trim_pending_results_buffer(self) -> None:
-        with self._state_lock:
-            if len(self._pending_results_buffer) > self.MAX_PENDING_RESULTS_BUFFER:
-                self._pending_results_buffer = self._pending_results_buffer[-self.MAX_PENDING_RESULTS_BUFFER :]
+            return bool(self._inbox) and now - self._last_normal >= self.config.breathing.normal_interval
+        if self._pending_results_buffer and now - self._last_normal >= self.config.breathing.normal_interval:
+            return True
+        return bool(self._inbox) and now - self._last_normal >= self.config.breathing.normal_interval
 
     def _drain_pending_results(self) -> None:
         if not self.query_board.has_pending_results():
@@ -195,15 +190,14 @@ class UnifiedLoop:
     def _effective_image_ref(self) -> str | None:
         if self.config.breathing.observation_mode != "visual":
             return None
-        with self._state_lock:
-            return self._latest_frame
+        return self._latest_frame
 
     def _heartbeat_cycle(self) -> None:
         pending_results = self._pending_results_snapshot()
         prompt = (
             f"△\n{self._observation_payload()}\n"
             f"Timeline:\n{self._timeline_brief()}\n"
-            f"PendingToolResults:{pending_results}\n"
+            f"PendingToolResults:{self._pending_results_buffer}\n"
             "仅输出 <idle/> 或 <event ...> 或 <react/>"
         )
         parsed = self._ask_model(prompt, max_tokens=self.config.breathing.heartbeat_max_tokens)
@@ -221,12 +215,10 @@ class UnifiedLoop:
             text=heartbeat_text,
             event_type=event_type,
             image_ref=self._effective_image_ref(),
-            tool_results=pending_results,
+            tool_results=list(self._pending_results_buffer),
         )
 
-        with self._state_lock:
-            react_enabled = self._react_enabled
-        if react_enabled and parsed.react and not self.config.breathing.heartbeat_only:
+        if self._react_enabled and parsed.react and not self.config.breathing.heartbeat_only:
             self._normal_cycle(trigger="react")
 
     def _normal_cycle(self, trigger: str) -> None:
@@ -238,7 +230,7 @@ class UnifiedLoop:
             f"NormalReasoning trigger={trigger}\n"
             f"UserInput:{message.get('text', '')}\n"
             f"ObservationMode:{self.config.breathing.observation_mode}\n"
-            f"PendingToolResults:{pending_results}\n"
+            f"PendingToolResults:{self._pending_results_buffer}\n"
             f"Timeline:\n{self._timeline_brief(max_n=24)}\n"
             "可用 tool_call。若无动作可回复 <idle/>"
         )
@@ -249,20 +241,13 @@ class UnifiedLoop:
             tool_exec_results.append(self.tool_manager.execute_tool_call(tc.name, tc.arguments))
 
         final_reply = filter_reply(parsed.reply)
-        if not final_reply:
-            final_reply = "<idle/>"
-
-        timeline_text = final_reply
-        user_text = str(message.get("text", "")).strip()
-        if user_text:
-            timeline_text = f"q:{user_text}\nassistant:{final_reply}"
-
-        self.timeline_manager.add_entry(
-            mode=LoopMode.NORMAL,
-            text=timeline_text,
-            image_ref=self._effective_image_ref(),
-            tool_results=tool_exec_results + pending_results,
-        )
+        if final_reply:
+            self.timeline_manager.add_entry(
+                mode=LoopMode.NORMAL,
+                text=final_reply,
+                image_ref=self._effective_image_ref(),
+                tool_results=tool_exec_results + list(self._pending_results_buffer),
+            )
 
         with self._state_lock:
             # Keep only the items seen by this cycle removed; retain concurrently-added items.
