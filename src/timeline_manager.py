@@ -39,11 +39,8 @@ class TimelineManager:
         return entry
 
     def should_distill(self, elapsed_sec: float, has_long_running_query: bool = False) -> bool:
-        return (
-            len(self._entries) >= self.distill_threshold
-            and elapsed_sec >= 0
-            or has_long_running_query
-        )
+        enough_entries = len(self._entries) >= self.distill_threshold
+        return (enough_entries and elapsed_sec >= 0) or has_long_running_query
 
     def entries(self) -> list[TimelineEntry]:
         return list(self._entries)

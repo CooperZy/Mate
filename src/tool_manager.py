@@ -74,8 +74,12 @@ class ToolManager:
 
     @staticmethod
     def _file_read(arguments: dict[str, Any]) -> dict[str, Any]:
-        path = Path(arguments["path"])
-        return {"path": str(path), "content": path.read_text(encoding="utf-8")}
+        root = Path.cwd().resolve()
+        raw_path = Path(arguments["path"])
+        resolved = (root / raw_path).resolve() if not raw_path.is_absolute() else raw_path.resolve()
+        if root not in resolved.parents and resolved != root:
+            raise ValueError("file_read path must stay within repository root")
+        return {"path": str(resolved), "content": resolved.read_text(encoding="utf-8")}
 
     def _todo(self, arguments: dict[str, Any]) -> dict[str, Any]:
         action = arguments.get("action", "list")
