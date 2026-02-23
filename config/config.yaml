@@ -1,0 +1,26 @@
+breathing:
+  heartbeat_interval: 0.4
+  heartbeat_max_tokens: 50
+  normal_interval: 1.5
+  soulbeat_interval: 30
+  soulbeat_max_tokens: 1024
+  soulbeat_timeline_threshold: 20
+timeline:
+  max_entries: 24
+  keep_after_distill: 8
+  max_summary_tokens: 1000
+identity:
+  directory: identity
+  hot_reload: true
+memory:
+  session_dir: memory/sessions
+  user_facts_file: memory/user_facts.md
+  session_retention_days: 30
+model:
+  base_url: http://localhost:8000/v1
+  model: Qwen/Qwen2.5-VL-72B
+  temperature: 0.7
+  max_tokens: 2048
+  timeout_sec: 30
+  retries: 1
+  api_key: EMPTY

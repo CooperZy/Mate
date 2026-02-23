@@ -41,6 +41,7 @@ class UnifiedLoop:
         self._react_enabled = True
         self._latest_frame: str | None = None
         self._inbox: deque[dict[str, Any]] = deque()
+        self._pending_results_buffer: list[dict[str, Any]] = []
         self._last_soulbeat = time.monotonic()
         self._last_heartbeat = 0.0
         self._last_normal = 0.0
@@ -68,12 +69,7 @@ class UnifiedLoop:
 
     def submit_camera_frame(self, image_ref: str) -> dict[str, Any]:
         self._latest_frame = image_ref
-        entry = self.timeline_manager.add_entry(
-            mode=LoopMode.HEARTBEAT,
-            text="camera_frame",
-            image_ref=image_ref,
-        )
-        return {"status": "ok", "frame_id": entry.id}
+        return {"status": "ok", "frame": image_ref}
 
     def set_react_enabled(self, enabled: bool) -> bool:
         self._react_enabled = enabled
@@ -85,30 +81,46 @@ class UnifiedLoop:
             "pending_queries": len(self._inbox),
             "timeline_size": len(self.timeline_manager.entries()),
             "tool_tasks": self.query_board.status(),
+            "has_frame": bool(self._latest_frame),
+            "last_soulbeat_sec": round(time.monotonic() - self._last_soulbeat, 2),
         }
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
             now = time.monotonic()
             did_work = False
+            self._drain_pending_results()
 
-            if now - self._last_heartbeat >= self.config.breathing.heartbeat_interval:
+            if self._pending_results_buffer and now - self._last_normal >= self.config.breathing.normal_interval:
+                self._normal_cycle(trigger="tool_result")
+                self._last_normal = now
+                did_work = True
+            elif self._inbox and now - self._last_normal >= self.config.breathing.normal_interval:
+                self._normal_cycle(trigger="inbox")
+                self._last_normal = now
+                did_work = True
+            elif self._soulbeat_due(now):
+                self._soulbeat_cycle()
+                self._last_soulbeat = now
+                did_work = True
+            elif now - self._last_heartbeat >= self.config.breathing.heartbeat_interval:
                 self._heartbeat_cycle()
                 self._last_heartbeat = now
                 did_work = True
 
-            if now - self._last_normal >= self.config.breathing.normal_interval and self._inbox:
-                self._normal_cycle(trigger="inbox")
-                self._last_normal = now
-                did_work = True
-
-            if now - self._last_soulbeat >= self.config.breathing.soulbeat_interval:
-                self._soulbeat_cycle()
-                self._last_soulbeat = now
-                did_work = True
-
             if not did_work:
                 time.sleep(0.02)
+
+    def _drain_pending_results(self) -> None:
+        if self.query_board.has_pending_results():
+            self._pending_results_buffer.extend(self.query_board.pop_pending_results())
+
+    def _soulbeat_due(self, now: float) -> bool:
+        elapsed = now - self._last_soulbeat
+        return elapsed >= self.config.breathing.soulbeat_interval and (
+            len(self.timeline_manager.entries()) >= self.config.breathing.soulbeat_timeline_threshold
+            or self.query_board.has_long_running_task(self.config.breathing.soulbeat_interval)
+        )
 
     def _system_context(self) -> str:
         identity_prefix = self.identity_loader.load_prefix()
@@ -122,21 +134,28 @@ class UnifiedLoop:
         return "\n".join(lines)
 
     def _heartbeat_cycle(self) -> None:
-        pending_results = self.query_board.pop_pending_results()
         prompt = (
             f"△\nTimeline:\n{self._timeline_brief()}\n"
-            f"PendingToolResults:{pending_results}\n"
+            f"PendingToolResults:{self._pending_results_buffer}\n"
             "仅输出 <idle/> 或 <event ...> 或 <react/>"
         )
         parsed = self._ask_model(prompt, max_tokens=self.config.breathing.heartbeat_max_tokens)
 
+        heartbeat_text = "<idle/>"
+        event_type = None
         if parsed.event:
-            self.timeline_manager.add_entry(
-                mode=LoopMode.HEARTBEAT,
-                text=parsed.event.text,
-                event_type=parsed.event.type,
-                tool_results=pending_results,
-            )
+            heartbeat_text = parsed.event.text
+            event_type = parsed.event.type
+        elif parsed.react:
+            heartbeat_text = "<react/>"
+
+        self.timeline_manager.add_entry(
+            mode=LoopMode.HEARTBEAT,
+            text=heartbeat_text,
+            event_type=event_type,
+            image_ref=self._latest_frame,
+            tool_results=list(self._pending_results_buffer),
+        )
 
         if self._react_enabled and parsed.react:
             self._normal_cycle(trigger="react")
@@ -146,7 +165,8 @@ class UnifiedLoop:
         prompt = (
             f"NormalReasoning trigger={trigger}\n"
             f"UserInput:{message.get('text', '')}\n"
-            f"Timeline:\n{self._timeline_brief()}\n"
+            f"PendingToolResults:{self._pending_results_buffer}\n"
+            f"Timeline:\n{self._timeline_brief(max_n=24)}\n"
             "可用 tool_call。若无动作可回复 <idle/>"
         )
         parsed = self._ask_model(prompt, max_tokens=self.config.model.max_tokens)
@@ -160,12 +180,13 @@ class UnifiedLoop:
             self.timeline_manager.add_entry(
                 mode=LoopMode.NORMAL,
                 text=final_reply,
-                tool_results=tool_exec_results,
+                image_ref=self._latest_frame,
+                tool_results=tool_exec_results + list(self._pending_results_buffer),
             )
 
+        self._pending_results_buffer.clear()
+
     def _soulbeat_cycle(self) -> None:
-        if len(self.timeline_manager.entries()) < self.config.breathing.soulbeat_timeline_threshold:
-            return
         prompt = (
             "◆\n请做结构化蒸馏:\n"
             "<distill><facts>..</facts><events>..</events><active>..</active><discard>..</discard></distill>\n"
@@ -176,16 +197,15 @@ class UnifiedLoop:
         self.session_memory.append_events(distill.events)
         self.session_memory.upsert_user_facts(distill.facts)
         self.timeline_manager.apply_distill(distill)
-        self.timeline_manager.add_entry(mode=LoopMode.SOULBEAT, text="distilled")
+        self.timeline_manager.add_entry(mode=LoopMode.SOULBEAT, text="distilled", image_ref=self._latest_frame)
 
     def _ask_model(self, prompt: str, max_tokens: int) -> Any:
         messages = [
             {"role": "system", "content": self._system_context()},
-            {"role": "user", "content": prompt},
+            self.llm.build_user_message(prompt, self._latest_frame),
         ]
         try:
             raw = self.llm.complete(messages=messages, max_tokens=max_tokens)
         except LLMServerError:
             raw = "<idle/>"
         return self.parser.parse(raw)
-

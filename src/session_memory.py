@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .config_loader import MemoryConfig
@@ -10,10 +10,12 @@ class SessionMemory:
     def __init__(self, config: MemoryConfig) -> None:
         self.session_dir = Path(config.session_dir)
         self.user_facts_file = Path(config.user_facts_file)
+        self.session_retention_days = config.session_retention_days
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.user_facts_file.parent.mkdir(parents=True, exist_ok=True)
         if not self.user_facts_file.exists():
             self.user_facts_file.write_text("# User Facts\n", encoding="utf-8")
+        self._cleanup_old_sessions()
 
     def append_events(self, events: list[str], when: datetime | None = None) -> Path:
         when = when or datetime.now()
@@ -43,3 +45,14 @@ class SessionMemory:
         latest = files[-1]
         return latest.read_text(encoding="utf-8")[-1200:]
 
+    def _cleanup_old_sessions(self) -> None:
+        if self.session_retention_days <= 0:
+            return
+        deadline = datetime.now() - timedelta(days=self.session_retention_days)
+        for p in self.session_dir.glob("*.md"):
+            try:
+                dt = datetime.strptime(p.stem, "%Y-%m-%d")
+            except ValueError:
+                continue
+            if dt < deadline:
+                p.unlink(missing_ok=True)
