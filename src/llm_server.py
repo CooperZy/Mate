@@ -45,3 +45,14 @@ class LLMServer:
                 last_error = exc
         raise LLMServerError(f"LLM request failed: {last_error}")
 
+    @staticmethod
+    def build_user_message(text: str, image_ref: str | None = None) -> dict[str, Any]:
+        if not image_ref:
+            return {"role": "user", "content": text}
+        return {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": text},
+                {"type": "image_url", "image_url": {"url": image_ref}},
+            ],
+        }

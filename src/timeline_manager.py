@@ -38,8 +38,12 @@ class TimelineManager:
             self._entries = self._entries[-self.config.max_entries :]
         return entry
 
-    def should_distill(self, elapsed_sec: float) -> bool:
-        return len(self._entries) >= self.distill_threshold or elapsed_sec >= 0
+    def should_distill(self, elapsed_sec: float, has_long_running_query: bool = False) -> bool:
+        return (
+            len(self._entries) >= self.distill_threshold
+            and elapsed_sec >= 0
+            or has_long_running_query
+        )
 
     def entries(self) -> list[TimelineEntry]:
         return list(self._entries)
@@ -52,4 +56,5 @@ class TimelineManager:
             self.summary = (self.summary + "\n" + "\n".join(distill.events)).strip()
         if len(self._entries) > self.config.keep_after_distill:
             self._entries = self._entries[-self.config.keep_after_distill :]
-
+        for active in distill.active:
+            self.add_entry(mode=LoopMode.SOULBEAT, text=f"active:{active}", event_type="active")
