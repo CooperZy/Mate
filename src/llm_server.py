@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-import requests
+try:
+    import requests
+except Exception:  # pragma: no cover - optional dependency fallback
+    requests = None  # type: ignore[assignment]
 
 from .config_loader import ModelConfig
 
@@ -21,6 +24,9 @@ class LLMServer:
         max_tokens: int | None = None,
         temperature: float | None = None,
     ) -> str:
+        if requests is None:
+            raise LLMServerError("requests is not installed")
+
         payload = {
             "model": self.config.model,
             "messages": messages,

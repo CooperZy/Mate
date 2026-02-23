@@ -75,9 +75,23 @@ class UnifiedLoop:
         self._react_enabled = enabled
         return self._react_enabled
 
+    def set_observation_mode(self, mode: str) -> str:
+        if mode not in {"visual", "text_only", "off"}:
+            raise ValueError("mode must be one of: visual, text_only, off")
+        self.config.breathing.observation_mode = mode
+        if mode != "visual":
+            self._latest_frame = None
+        return self.config.breathing.observation_mode
+
+    def set_heartbeat_only(self, enabled: bool) -> bool:
+        self.config.breathing.heartbeat_only = enabled
+        return self.config.breathing.heartbeat_only
+
     def status(self) -> dict[str, Any]:
         return {
             "react_enabled": self._react_enabled,
+            "observation_mode": self.config.breathing.observation_mode,
+            "heartbeat_only": self.config.breathing.heartbeat_only,
             "pending_queries": len(self._inbox),
             "timeline_size": len(self.timeline_manager.entries()),
             "tool_tasks": self.query_board.status(),
@@ -91,12 +105,9 @@ class UnifiedLoop:
             did_work = False
             self._drain_pending_results()
 
-            if self._pending_results_buffer and now - self._last_normal >= self.config.breathing.normal_interval:
-                self._normal_cycle(trigger="tool_result")
-                self._last_normal = now
-                did_work = True
-            elif self._inbox and now - self._last_normal >= self.config.breathing.normal_interval:
-                self._normal_cycle(trigger="inbox")
+            if self._should_run_normal_cycle(now):
+                trigger = "tool_result" if self._pending_results_buffer else "inbox"
+                self._normal_cycle(trigger=trigger)
                 self._last_normal = now
                 did_work = True
             elif self._soulbeat_due(now):
@@ -110,6 +121,13 @@ class UnifiedLoop:
 
             if not did_work:
                 time.sleep(0.02)
+
+    def _should_run_normal_cycle(self, now: float) -> bool:
+        if self.config.breathing.heartbeat_only:
+            return bool(self._inbox) and now - self._last_normal >= self.config.breathing.normal_interval
+        if self._pending_results_buffer and now - self._last_normal >= self.config.breathing.normal_interval:
+            return True
+        return bool(self._inbox) and now - self._last_normal >= self.config.breathing.normal_interval
 
     def _drain_pending_results(self) -> None:
         if self.query_board.has_pending_results():
@@ -133,9 +151,26 @@ class UnifiedLoop:
         lines = [f"[{e.id}] {e.mode.value} {e.text}" for e in entries]
         return "\n".join(lines)
 
+    def _observation_payload(self) -> str:
+        mode = self.config.breathing.observation_mode
+        if mode == "visual":
+            return "Observation: visual frame attached when available."
+        if mode == "text_only":
+            return (
+                "Observation: text-only heartbeat (no image). "
+                "Infer urgency only from timeline and pending tool results."
+            )
+        return "Observation: off (no observation). Emit <idle/> unless pending results imply action."
+
+    def _effective_image_ref(self) -> str | None:
+        if self.config.breathing.observation_mode != "visual":
+            return None
+        return self._latest_frame
+
     def _heartbeat_cycle(self) -> None:
         prompt = (
-            f"△\nTimeline:\n{self._timeline_brief()}\n"
+            f"△\n{self._observation_payload()}\n"
+            f"Timeline:\n{self._timeline_brief()}\n"
             f"PendingToolResults:{self._pending_results_buffer}\n"
             "仅输出 <idle/> 或 <event ...> 或 <react/>"
         )
@@ -153,11 +188,11 @@ class UnifiedLoop:
             mode=LoopMode.HEARTBEAT,
             text=heartbeat_text,
             event_type=event_type,
-            image_ref=self._latest_frame,
+            image_ref=self._effective_image_ref(),
             tool_results=list(self._pending_results_buffer),
         )
 
-        if self._react_enabled and parsed.react:
+        if self._react_enabled and parsed.react and not self.config.breathing.heartbeat_only:
             self._normal_cycle(trigger="react")
 
     def _normal_cycle(self, trigger: str) -> None:
@@ -165,6 +200,7 @@ class UnifiedLoop:
         prompt = (
             f"NormalReasoning trigger={trigger}\n"
             f"UserInput:{message.get('text', '')}\n"
+            f"ObservationMode:{self.config.breathing.observation_mode}\n"
             f"PendingToolResults:{self._pending_results_buffer}\n"
             f"Timeline:\n{self._timeline_brief(max_n=24)}\n"
             "可用 tool_call。若无动作可回复 <idle/>"
@@ -180,7 +216,7 @@ class UnifiedLoop:
             self.timeline_manager.add_entry(
                 mode=LoopMode.NORMAL,
                 text=final_reply,
-                image_ref=self._latest_frame,
+                image_ref=self._effective_image_ref(),
                 tool_results=tool_exec_results + list(self._pending_results_buffer),
             )
 
@@ -197,12 +233,12 @@ class UnifiedLoop:
         self.session_memory.append_events(distill.events)
         self.session_memory.upsert_user_facts(distill.facts)
         self.timeline_manager.apply_distill(distill)
-        self.timeline_manager.add_entry(mode=LoopMode.SOULBEAT, text="distilled", image_ref=self._latest_frame)
+        self.timeline_manager.add_entry(mode=LoopMode.SOULBEAT, text="distilled", image_ref=self._effective_image_ref())
 
     def _ask_model(self, prompt: str, max_tokens: int) -> Any:
         messages = [
             {"role": "system", "content": self._system_context()},
-            self.llm.build_user_message(prompt, self._latest_frame),
+            self.llm.build_user_message(prompt, self._effective_image_ref()),
         ]
         try:
             raw = self.llm.complete(messages=messages, max_tokens=max_tokens)

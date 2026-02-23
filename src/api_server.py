@@ -68,6 +68,28 @@ def create_app(config_path: str = "config/config.yaml") -> Flask:
             return {"error": "text is required"}, 400
         return jsonify(app.config["loop"].submit_query(text, {"source": "asr"})), 202
 
+
+    @app.post("/mode")
+    def mode() -> tuple[dict, int]:
+        payload = request.get_json(force=True, silent=True) or {}
+
+        response: dict[str, object] = {}
+        if "observation_mode" in payload:
+            try:
+                response["observation_mode"] = app.config["loop"].set_observation_mode(str(payload["observation_mode"]))
+            except ValueError as exc:
+                return {"error": str(exc)}, 400
+
+        if "heartbeat_only" in payload:
+            response["heartbeat_only"] = app.config["loop"].set_heartbeat_only(bool(payload["heartbeat_only"]))
+
+        if not response:
+            response = {
+                "observation_mode": app.config["loop"].status()["observation_mode"],
+                "heartbeat_only": app.config["loop"].status()["heartbeat_only"],
+            }
+        return jsonify(response), 200
+
     @app.post("/tts")
     def tts() -> tuple[dict, int]:
         payload = request.get_json(force=True, silent=True) or {}
